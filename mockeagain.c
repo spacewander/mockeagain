@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <unistd.h>
 
 #if DDEBUG
 #   define dd(...) \
@@ -39,6 +40,19 @@ static size_t matchbuf_len = 0;
 static const char *pattern = NULL;
 static int verbose = -1;
 static int mocking_type = -1;
+
+
+#if __linux__
+#define STR(n)              #n
+#define MAX_FD_LEN          (sizeof(STR(MAX_FD)) - 1)
+#define PROCFS_PREFIX       "/proc/self/fd/"
+#define PROCFS_PREFIX_LEN   (sizeof(PROCFS_PREFIX) - 1)
+#define ANON_INODE "anon_inode:["
+#define ANON_INODE_LEN (sizeof(ANON_INODE) - 1)
+
+static char proc_fd_path[PROCFS_PREFIX_LEN + MAX_FD_LEN + 1] = PROCFS_PREFIX;
+static char fd_type_buf[ANON_INODE_LEN];
+#endif
 
 
 enum {
@@ -634,7 +648,34 @@ read(int fd, void *buf, size_t len)
 
         dd("calling the original read on fd %d", fd);
 
+#if __linux__
+        int n;
+
+        n = snprintf(proc_fd_path + PROCFS_PREFIX_LEN, MAX_FD_LEN + 1, "%d", fd);
+        if (n < 0) {
+            perror("snprintf");
+        }
+
+        if (n > (int) MAX_FD_LEN) {
+            fprintf(stderr, "mockeagain: not enough space to write "
+                    "/proc/self/fd/%d\n", fd);
+        }
+
+        if ((n = readlink(proc_fd_path, fd_type_buf, ANON_INODE_LEN)) == -1) {
+            perror("readlink");
+        }
+
+        if (strncmp(fd_type_buf, ANON_INODE, ANON_INODE_LEN) == 0) {
+            fprintf(stderr, "fd %d is an anon_inode\n", fd);
+            retval = (*orig_read)(fd, buf, len);
+
+        } else {
+            retval = (*orig_read)(fd, buf, 1);
+        }
+
+#else
         retval = (*orig_read)(fd, buf, 1);
+#endif
         active_fds[fd] &= ~POLLIN;
 
     } else {
